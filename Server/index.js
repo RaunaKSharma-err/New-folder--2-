@@ -5,53 +5,26 @@ const bodyParser = require("body-parser");
 const fs = require("fs");
 const csvParser = require("csv-parser");
 
-// Initialize the app
 const app = express();
 const PORT = 5000;
 
-// Middleware
 app.use(
   cors({
-    origin: "http://localhost:5173", // Allow only the frontend to access the backend
-    methods: ["GET", "POST", "PUT", "DELETE"], // Allow these HTTP methods
-    allowedHeaders: ["Content-Type"], // Allow these headers
+    origin: "http://localhost:5173",
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type"],
   })
 );
-app.options("*", cors()); // This handles preflight OPTIONS requests
+app.options("*", cors());
 
 app.use(bodyParser.json());
 
-// MongoDB connection setup
-const connectDB = async () => {
-  try {
-    await mongoose.connect("mongodb://localhost:27017/football", {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    console.log("MongoDB connected");
-  } catch (err) {
-    console.error(err.message);
-    process.exit(1);
-  }
-};
-connectDB();
+const { connectMongoDB } = require("./src/mongoDBconnect");
+connectMongoDB("mongodb://127.0.0.1:27017/football")
+  .then(() => console.log("MongoDB connected!"))
+  .catch((err) => console.log("MongoDB error", err));
 
-// Mongoose Schema and Model
-const footballSchema = new mongoose.Schema({
-  team: { type: String, required: true },
-  gamesPlayed: { type: Number, required: true },
-  win: { type: Number, required: true },
-  draw: { type: Number, required: true },
-  loss: { type: Number, required: true },
-  goalsFor: { type: Number, required: true },
-  goalsAgainst: { type: Number, required: true },
-  points: { type: Number, required: true },
-  year: { type: Number, required: true },
-});
-
-const Football = mongoose.model("Football", footballSchema);
-
-// Routes
+const Football = require("./src/schema");
 
 // POST: Add a new record
 app.post("/api/football/add", async (req, res) => {
@@ -151,15 +124,30 @@ app.get("/api/football/summary/:year", async (req, res) => {
 });
 
 // GET: Query top 10 teams with "won" greater than a given value
-app.get("/api/football/top-teams/:won", async (req, res) => {
-  const { won } = req.params;
+app.get("/api/football/top-teams/:minWins", async (req, res) => {
+  const { minWins } = req.params;
+
+  // Parse minWins to an integer
+  const minWinsNumber = parseInt(minWins, 10);
+
+  // Check if minWinsNumber is a valid number
+  if (isNaN(minWinsNumber)) {
+    return res.status(400).json({ message: "Invalid 'minWins' parameter. Please provide a valid number." });
+  }
+
   try {
-    const teams = await Football.find({ win: { $gt: parseInt(won) } }).limit(
-      10
-    );
+    const teams = await Football.find({ win: { $gte: minWinsNumber } })
+      .sort({ win: -1 }) // Sort by wins in descending order
+      .limit(10); // Limit to top 10 teams
+
+    if (teams.length === 0) {
+      return res.status(404).json({ message: "No teams found with the given criteria" });
+    }
+
     res.status(200).json(teams);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error("Error fetching teams:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
@@ -168,14 +156,14 @@ app.get("/api/football/avg-goals/:year/:goalFor", async (req, res) => {
   const { year, goalFor } = req.params;
   try {
     const teams = await Football.aggregate([
-      { $match: { year: parseInt(year) } },
+      { $match: { year: parseInt(year) } },  // Match teams for the given year
       {
         $group: {
           _id: "$team",
-          avgGoalsFor: { $avg: "$goalsFor" },
+          avgGoalsFor: { $avg: "$goalsFor" },  // Calculate average goalsFor
         },
       },
-      { $match: { avgGoalsFor: { $gt: parseInt(goalFor) } } },
+      { $match: { avgGoalsFor: { $gt: parseFloat(goalFor) } } },  // Filter teams with avgGoalsFor greater than the given value
     ]);
     res.status(200).json(teams);
   } catch (err) {
@@ -187,25 +175,33 @@ app.get("/api/football/avg-goals/:year/:goalFor", async (req, res) => {
 app.get("/api/football/load-csv", (req, res) => {
   const results = [];
 
-  // Read and parse the CSV file
-  fs.createReadStream(csvFilePath)
+  fs.createReadStream("./FootbalCSV.csv")
     .pipe(csvParser())
     .on("data", (row) => {
       results.push(row);
     })
-    .on("end", () => {
-      // Send the parsed data as a JSON response
-      res.json(results);
+    .on("end", async () => {
+      try {
+        // Insert all rows into MongoDB
+        await FootballModel.insertMany(results);
+        res.status(200).json({
+          message: "CSV data successfully loaded into MongoDB",
+          data: results,
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: "Error inserting data into MongoDB",
+          details: error.message,
+        });
+      }
     })
     .on("error", (err) => {
-      // Handle file reading errors
       res
         .status(500)
         .json({ error: "Error reading CSV file", details: err.message });
     });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Server running on the PORT:${PORT}`);
 });
